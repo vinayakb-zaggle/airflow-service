@@ -1,0 +1,16 @@
+version: '3'
+services:
+  airflow-v1:
+    image: airflow-v1:2.10.5
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow:/opt/airflow
+      - ./airflow/java-jars:/airflow/java-jars
+      - ./airflow/java-jars:/opt/airflow/libs
+    environment:
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW_DATABASE: postgresql+psycopg2://airflow_user:airflow123@host.docker.internal/airflow_db_v2
+      AIRFLOW_LOGGING_REMOTE_BASE_LOG_FOLDER: s3://313142695293-logs/airflow-logs/
+      AIRFLOW_LOGGING_REMOTE_LOG_CONN_ID: zaggle_s3
+    command: airflow standalone
