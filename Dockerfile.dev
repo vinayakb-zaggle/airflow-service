@@ -1,0 +1,36 @@
+FROM apache/airflow:2.10.5
+
+USER root
+# Install Git and OpenJDK in a single layer
+RUN apt-get update && \
+    apt-get install -y git openjdk-17-jre && \
+    apt-get clean
+
+# Set JAVA_HOME for JVM (used by JPype)
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="$JAVA_HOME/bin:$PATH"
+
+# Create a directory for JARs (optional but clean)
+RUN mkdir -p /opt/airflow/libs
+
+# Copy your shaded JAR from the build context into the container
+COPY airflow/java-jars/transformer-lib-1.0.0-SNAPSHOT.jar /opt/airflow/libs/
+
+# Copy the 'dags', 'java-jars', 'utils', and configuration files into the container
+COPY airflow/dags/ /opt/airflow/dags/
+COPY airflow/java-jars/ /opt/airflow/java-jars/
+COPY airflow/utils/ /opt/airflow/utils/
+COPY airflow/airflow.cfg /opt/airflow/airflow.cfg
+
+USER airflow
+# Install extra Airflow provider
+RUN pip install jpype1 apache-airflow-providers-mongo
+
+# Set the entrypoint (if you have a custom entrypoint)
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]
+
+# Expose the webserver port
+EXPOSE 8080
+
+# Default command (can be overridden in ECS task definition)
+CMD ["airflow", "standalone"]
