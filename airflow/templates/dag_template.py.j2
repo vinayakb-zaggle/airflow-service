@@ -1,0 +1,117 @@
+import os
+import sys
+import json
+
+# Add the airflow directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime
+from utils.connector_handler import process_webhook_request, execute_connector, create_update_pipeline_lifecycle
+
+import logging
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def webhook(**context):
+    """
+    Process webhook request and return pipeline ID
+    """
+    request_body = context['dag_run'].conf
+    if not request_body:
+        raise ValueError("No request body provided in DAG configuration")
+    
+    connector_payload = process_webhook_request(request_body)
+    return connector_payload;
+
+def generic_task(step_name, pipeline_id, **context):
+    def _task(**context):
+        ti = context['task_instance']
+        print(f"Running: {step_name}")
+        upstream_task_id = context.get('params', {}).get('upstream_task_id')
+        
+        # Get connector payload from XCom, now pulling from the correct task
+        connector_payload = ti.xcom_pull(task_ids = upstream_task_id)
+        logger.info(f"Connector payload: {connector_payload}")
+
+        is_final_connector = step_name == connector_payload['finalConnector']
+        result = execute_connector(connector_payload, step_name, is_final_connector)
+        
+        return result
+    return _task
+
+def save_to_db_task(pipeline_id, step=None, **context):
+    ti = context['task_instance']
+    
+    # Get the result from the previous task
+    upstream_task_id = context.get('params', {}).get('upstream_task_id')
+    if not upstream_task_id:
+        raise ValueError("save_to_db task requires an upstream task")
+    
+    # Get previous result connector payload
+    connector_payload = ti.xcom_pull(task_ids=upstream_task_id)
+    
+    # Create/update pipeline lifecycle record with success status
+    create_update_pipeline_lifecycle(
+        pipeline_id=connector_payload['pipelineId'],
+        client_id=connector_payload['clientId'], 
+        tenant_id=connector_payload['tenantId'],
+        connector=step,  # Using step as connector name
+        status=1,  # 1 indicates success
+        request_payload=json.dumps(connector_payload.get('request', {})),
+        response_payload=json.dumps(connector_payload.get('response', {})),
+        trigger=connector_payload.get('trigger', 'webhook')
+    )
+
+    # Return the previous result payload
+    return connector_payload
+
+default_args = {
+    'start_date': datetime(2023, 1, 1),
+    'catchup': False
+}
+
+with DAG(dag_id="{{ dag_id }}",
+         default_args=default_args,
+         schedule_interval=None,
+         tags=["zig-core-svc", "pipeline"]) as dag:
+
+    webhook_task = PythonOperator(
+        task_id="webhook",
+        python_callable=webhook
+    )
+
+    {% for task in tasks %}
+    {{ task.variable_name }} = PythonOperator(
+        task_id="{{ task.task_id }}",
+        python_callable=generic_task("{{ task.task_id }}", "{{ dag_id }}"),
+        params={
+            'upstream_task_id': "{{ 'webhook' if loop.index == 1 else tasks[loop.index0 - 1].persist_variable_name }}"
+        }
+    )
+
+    {{ task.persist_variable_name }} = PythonOperator(
+        task_id="persist_{{ loop.index }}",
+        python_callable=save_to_db_task,
+        op_kwargs={
+            'pipeline_id': "{{ dag_id }}",
+            'step': "{{ task.task_id }}"
+        },
+        params={
+            'upstream_task_id': "{{ task.task_id }}"
+        }
+    )
+    {% endfor %}
+
+    # Set task dependencies
+    {% if tasks %}
+    webhook_task >> {{ tasks[0].variable_name }}
+    {% for i in range(tasks|length) %}
+    {{ tasks[i].variable_name }} >> {{ tasks[i].persist_variable_name }}
+    {% if not loop.last %}
+    {{ tasks[i].persist_variable_name }} >> {{ tasks[i + 1].variable_name }}
+    {% endif %}
+    {% endfor %}
+    {% endif %}

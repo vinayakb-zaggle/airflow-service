@@ -13,7 +13,7 @@ from airflow.operators.empty import EmptyOperator as DummyOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.exceptions import AirflowSkipException
 from airflow.models import Variable
-from utils.connector_utils import process_webhook_request, execute_connector, create_update_pipeline_lifecycle
+from utils.connector_handler import process_webhook_request, execute_connector, create_update_pipeline_lifecycle
 
 def get_pipeline_config():
     """

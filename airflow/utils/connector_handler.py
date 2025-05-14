@@ -8,16 +8,26 @@ import jpype
 import jpype.imports
 from jpype.types import JString
 
+import logging
+import requests
+from typing import Dict, Any
+
+import os
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
+from functools import lru_cache
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 def process_webhook_request(request_body: Dict[str, Any]) -> Dict[str, Any]:
     """
     Process the webhook request and prepare connector payload
     """
-    # Connect to MongoDB using the configured connection
-    mongo_hook = MongoHook(conn_id='my_mongo_db')
-    
     # Get the collections
-    webhook_collection = mongo_hook.get_collection('webhook')
-    pipeline_collection = mongo_hook.get_collection('pipeline')
+    webhook_collection = get_collection('webhook')
+    pipeline_collection = get_collection('pipeline')
     
     # Find webhook data
     webhook_data = webhook_collection.find_one({
@@ -78,27 +88,29 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
     
     default_values = connector_payload.get('defaultValues', {}) if is_final_connector else {}
     trigger = connector_payload.get('trigger')
-    
+
     # Add connector name to the payload
     connector_payload['connector'] = connector
 
-    # Print connector payload for debugging
-    print(f"\nExecuting connector: {connector}")
-    print("Connector payload:")
-    print(connector_payload)
+    create_update_pipeline_lifecycle(
+        pipeline_id=connector_payload['pipelineId'],
+        client_id=connector_payload['clientId'], 
+        tenant_id=connector_payload['tenantId'],
+        connector=connector,
+        status=0,  # 0 indicates in progress
+        request_payload=json.dumps(connector_payload.get('request', {})),
+        response_payload="",  # Empty response payload as task hasn't completed yet
+        trigger=connector_payload.get('trigger', 'webhook')
+    )
     
     if "SQI" in connector:
         # Initialize MongoDB connection
-        mongo_hook = MongoHook(conn_id='my_mongo_db')
-        
+        collection = get_collection("sequence_invocations")
         # Handle Sequence Invocation case
         sequence_invocation_id = connector.split(".")[1]
         
         # Fetch sequence invocation from MongoDB
-        sequence_invocation = mongo_hook.find_one(
-            mongo_collection='sequence_invocations',
-            query={'_id': sequence_invocation_id}
-        )
+        sequence_invocation = collection.find_one({'_id': sequence_invocation_id})
         
         if not sequence_invocation:
             raise Exception("Sequence Invocation not found")
@@ -108,13 +120,6 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
         # Execute source connector
         if f"{sqi_source_connector.replace('.', '_')}" not in connector_payload.get('finalRequestPayload', {}):
             # Make API call for source connector
-            # source_response = make_api_call(
-            #     pipeline_id=pipeline_id,
-            #     connector=sqi_source_connector,
-            #     client_id=client_id,
-            #     tenant_id=tenant_id,
-            #     payload=payload
-            # )
             source_response = execute_api_call(
                 pipeline_id=pipeline_id,
                 connector=sqi_source_connector,
@@ -154,15 +159,6 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
         
         # Update the request field in connector payload with transformed payload
         connector_payload['request'] = destination_payload
-        
-        # Make API call for destination connector
-        # destination_response = make_api_call(
-        #     pipeline_id=pipeline_id,
-        #     connector=sqi_destination_connector,
-        #     client_id=client_id,
-        #     tenant_id=tenant_id,
-        #     payload=destination_payload
-        # )
 
         destination_response = execute_api_call(
             pipeline_id=pipeline_id,
@@ -200,21 +196,11 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
             transformed_payload = call_java_transform(
                 fields=mappings,
                 source_payload=json.dumps(payload)
-                # source_payload=payload
             )
             payload = json.loads(transformed_payload)
         
         # Update the request field in connector payload with transformed payload
         connector_payload['request'] = payload
-        
-        # Make API call for the connector
-        # response = make_api_call(
-        #     pipeline_id=pipeline_id,
-        #     connector=connector,
-        #     client_id=client_id,
-        #     tenant_id=tenant_id,
-        #     payload=payload
-        # )
 
         response = execute_api_call(
             pipeline_id=pipeline_id,
@@ -223,6 +209,8 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
             tenant_id=tenant_id,
             payload=payload
         )
+
+        logger.info(f"Api Response: {response}")
         
         if response.get('status') == 'FAILURE':
             create_update_pipeline_lifecycle(
@@ -235,14 +223,14 @@ def execute_connector(connector_payload: Dict[str, Any], connector: str, is_fina
                 response_payload=json.dumps(response.get('data')),
                 trigger=trigger
             )
-            raise Exception("Connector Execution Failed")
+            raise Exception(f"Execution failed for connector: {connector}")
         
         # Update the response field in connector payload with the response data
         connector_payload['response'] = response.get('data')
         
         if f"{connector.replace('.', '_')}" not in connector_payload.get('finalRequestPayload', {}):
             connector_payload['finalRequestPayload'][connector.replace('.', '_')] = response.get('data')
-    
+    logger.info(f"Operation Completes for: {connector}")
     return connector_payload
 
 def create_update_pipeline_lifecycle(
@@ -268,8 +256,7 @@ def create_update_pipeline_lifecycle(
         response_payload (str): The response payload as JSON string
         trigger (str): The trigger type
     """
-    mongo_hook = MongoHook(conn_id='my_mongo_db')
-    collection = mongo_hook.get_collection('pipelineLifecycle')
+    collection = get_collection('pipelineLifecycle')
     
     # Find existing record
     existing = collection.find_one({
@@ -302,6 +289,7 @@ def create_update_pipeline_lifecycle(
         doc['_id'] = str(uuid.uuid4())
         doc['createdAt'] = now
         collection.insert_one(doc)
+    logger.info(f"Details Saved Successfully!")
 
 def call_java_transform(
     fields: List[Dict[str, Any]],
@@ -348,19 +336,18 @@ def call_java_transform(
             
             java_fields.add(map1)
         
-        print("Java fields:")
-        print(java_fields)
-
+        logger.info(f"Field Mapping: {java_fields}")
         # Prepare the JSON payload as a JsonNode
         mapper = ObjectMapper()
         payload = mapper.readTree(JString(source_payload))
 
-        print("Payload:")
-        print(payload)
+        logger.info(f"Source Payload: {payload}")
 
         # Create transformer instance and call the method
         transformer_instance = Transformer()
         result = transformer_instance.transformData(java_fields, payload)
+
+        logger.info(f"Transformed Payload: {result}")
         
         # Convert Java String to Python string
         return str(result)
@@ -368,52 +355,6 @@ def call_java_transform(
         # Log the error but don't shut down JVM
         print(f"Error in Java transformation: {str(e)}")
         raise 
-
-def make_api_call(
-    pipeline_id: str,
-    connector: str,
-    client_id: str,
-    tenant_id: str,
-    payload: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    Make API call to execute connector
-    
-    Args:
-        pipeline_id (str): The pipeline ID
-        connector (str): The connector name
-        client_id (str): The client ID
-        tenant_id (str): The tenant ID
-        payload (Dict[str, Any]): The payload to send
-    """
-    # Special case for EMS.expanse.report connector
-    if connector == 'EMS.expanse.report':
-        try:
-            response = requests.get('https://qa-admin.zaggle.in/api/v3/ems-expense-report/report/49a6c10e-c6e4-4c24-a258-df5319cb7f1f')
-            response.raise_for_status()
-            return {
-                "status": "SUCCESS",
-                "data": response.json()
-            }
-        except Exception as e:
-            return {
-                "status": "FAILURE",
-                "data": {
-                    "error": str(e)
-                }
-            }
-
-    # Default dummy response for other connectors
-    return {
-        "status": "SUCCESS",
-        "data": {
-            "message": "Dummy success response",
-            "connector": connector,
-            "pipelineId": pipeline_id,
-            "clientId": client_id,
-            "tenantId": tenant_id
-        }
-    }
 
 def execute_api_call(
     pipeline_id: str,
@@ -438,7 +379,7 @@ def execute_api_call(
     if connector == 'EMS.expanse.report':
         try:
             # Construct the API endpoint URL
-            api_url = f"http://host.docker.internal:8083/api/v1/zig/api/v1/execute/api"
+            api_url = f"https://dev-zig-svc.zaggle.in/api/v1/zig/airflow/execute/api"
             
             # Prepare the request payload
             request_payload = {
@@ -456,14 +397,11 @@ def execute_api_call(
                 headers={"Content-Type": "application/json"}
             )
             
-            # Raise an exception for bad status codes
-            response.raise_for_status()
-            
             # Get the response data
             response_data = response.json()
             
             # Check if status is Failed
-            if response_data.get('status') == 'Failed':
+            if response_data.get('status') == 'Failure':
                 return {
                     "status": "FAILURE",
                     "data": response_data
@@ -506,3 +444,38 @@ def execute_api_call(
             "tenantId": tenant_id
         }
     }
+
+@lru_cache(maxsize=1)
+def get_mongo_client() :
+    mongo_uri = os.getenv("ZIG_MONGO_DB_URI")
+    if not mongo_uri:
+        raise ValueError("ZIG_MONGO_DB_URI is not set in the environment variable")
+    client = MongoClient(mongo_uri)
+    logging.info(f"Get mongo client called")
+    try:
+        client.admin.command('ping')
+    except ConnectionFailure as e:
+        logging.error(f"Error connecting to MongoDB: {e}")
+        raise
+
+    return client
+
+def get_mongo_db(client):
+    # Get database name from environment variables
+    db_name = os.getenv("ZIG_MONGO_DB")
+    if not db_name:
+        raise ValueError("MongoDB database name is not set in the environment variables")
+    db = client[db_name]
+
+    try:
+        db.list_collection_names()
+    except Exception as e:
+        logging.error(f"Error accessing the database: {e}")
+        raise
+
+    return db
+
+def get_collection(name: str):
+    client = get_mongo_client()
+    db = get_mongo_db(client)
+    return db[name]
