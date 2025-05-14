@@ -27,3 +27,31 @@ smtp_user = vinayakvinayak627@gmail.com
 smtp_password = kkatjothfhhyrynr [Google app password, created form manage google account]  
 smtp_port = 587  
 smtp_mail_from = vinayakvinayak627@gmail.com
+
+**Important Note:**  
+When you are running in dev, according to Dockerfile all dags present in dags folder will be deleted except dynamic_dag_generator.py and airflow will import from s3 bucket.
+
+**Environment Variables:**  
+AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+AIRFLOW_DATABASE: postgresql+psycopg2://airflow_user:airflow123@host.docker.internal/airflow_db_v2
+AIRFLOW_LOGGING_REMOTE_BASE_LOG_FOLDER: s3://313142695293-logs/airflow-logs/
+AIRFLOW_LOGGING_REMOTE_LOG_CONN_ID: zaggle_s3
+AIRFLOW_REMOTE_DAGS_FOLDER: s3://313142695293-logs/airflow-logs/
+AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}  # Or your preferred region   
+
+**Docker run command**  
+docker run -d \
+  --name airflow-container \
+  -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID=AKIAUR2GCKV63UXI42Q4 \
+  -e AWS_SECRET_ACCESS_KEY=yaA/nkpMOepc8YxfxLxqm1uI8Ug1tndjwWzdjo/v \
+  -e AWS_DEFAULT_REGION=ap-south-1 \
+  -e AIRFLOW__WEBSERVER__EXPOSE_CONFIG="True"\
+  -e AIRFLOW_DATABASE=postgresql+psycopg2://airflow_user:airflow123@host.docker.internal/airflow_db_v2\
+  -e AIRFLOW_LOGGING_REMOTE_BASE_LOG_FOLDER=s3://313142695293-logs/dags/\
+  -e AIRFLOW_REMOTE_DAGS_FOLDER="s3://313142695293-logs/dags/" \
+  -e ZIG_MONGO_DB_URI=mongodb://v2:v2@host.docker.internal:27017 \
+  -e ZIG_MONGO_DB=zig-core-svc \
+  airflowservice:2.10.5
