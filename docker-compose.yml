@@ -13,4 +13,8 @@ services:
       AIRFLOW_DATABASE: postgresql+psycopg2://airflow_user:airflow123@host.docker.internal/airflow_db_v2
       AIRFLOW_LOGGING_REMOTE_BASE_LOG_FOLDER: s3://313142695293-logs/airflow-logs/
       AIRFLOW_LOGGING_REMOTE_LOG_CONN_ID: zaggle_s3
+      AIRFLOW_REMOTE_DAGS_FOLDER: s3://313142695293-logs/airflow-logs/
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
     command: airflow standalone
